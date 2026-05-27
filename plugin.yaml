@@ -1,0 +1,9 @@
+name: hermes-buddy
+version: 1.0.0
+description: "OLED status display for Hermes — shows active tool, session state, and a buddy companion on a D1 Mini + SSD1306 OLED. Pairs with claude-buddy for dual-agent display on one device. Server runs on port 3004 (HERMES_BUDDY_PORT)."
+author: rangulvers
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - post_api_request
+  - post_llm_call
