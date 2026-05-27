@@ -2,8 +2,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,12 +22,8 @@ _spec.loader.exec_module(hermes_buddy_plugin)
 
 @pytest.fixture(autouse=True)
 def tmp_status(tmp_path, monkeypatch):
-    """Redirect STATUS_FILE to a temp path for each test."""
-    # Re-exec module to reset _last_usage_key between tests.
-    # importlib.reload() requires the module name to be findable on sys.path,
-    # which isn't possible for a spec_from_file_location with a synthetic name,
-    # so we re-exec the spec's loader directly instead.
-    _spec.loader.exec_module(hermes_buddy_plugin)
+    """Redirect STATUS_FILE to a temp path and reset module state for each test."""
+    hermes_buddy_plugin._last_usage_key = None
     status = tmp_path / "hermes-status.json"
     monkeypatch.setattr(hermes_buddy_plugin, "STATUS_FILE", status)
     yield status

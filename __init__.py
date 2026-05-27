@@ -30,37 +30,41 @@ STATUS_FILE = Path("/tmp/hermes-status.json")
 
 _last_usage_key: tuple | None = None
 _usage_lock = threading.Lock()
+_write_lock = threading.Lock()
 
 
-def _write_status(updates: dict[str, Any]) -> None:
+def _write_status(updates: dict[str, Any], tokens_delta: int = 0) -> None:
     """Atomically write updates merged into STATUS_FILE under an exclusive flock."""
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(STATUS_FILE.parent), prefix=".hermes-status-", suffix=".tmp"
-    )
-    try:
-        current: dict[str, Any] = {}
-        if STATUS_FILE.exists():
-            try:
-                current = json.loads(STATUS_FILE.read_text())
-            except Exception:
-                pass
-        current.update(updates)
-        current["ts"] = int(time.time())
-        with os.fdopen(tmp_fd, "w") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            try:
-                json.dump(current, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
-            finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-        os.replace(tmp_path, STATUS_FILE)
-    except Exception as exc:
-        logger.warning("hermes-buddy: status write failed: %s", exc)
+    with _write_lock:
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(STATUS_FILE.parent), prefix=".hermes-status-", suffix=".tmp"
+        )
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+            current: dict[str, Any] = {}
+            if STATUS_FILE.exists():
+                try:
+                    current = json.loads(STATUS_FILE.read_text())
+                except Exception:
+                    pass
+            current.update(updates)
+            if tokens_delta > 0:
+                current["tokens_today"] = current.get("tokens_today", 0) + tokens_delta
+            current["ts"] = int(time.time())
+            with os.fdopen(tmp_fd, "w") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                try:
+                    json.dump(current, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+            os.replace(tmp_path, STATUS_FILE)
+        except Exception as exc:
+            logger.warning("hermes-buddy: status write failed: %s", exc)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def on_pre_tool_call(*, tool_name: str = "", **_: Any) -> None:
@@ -95,17 +99,8 @@ def on_post_api_request(
     usage: Any = None,
     **_: Any,
 ) -> None:
-    updates: dict[str, Any] = {"running": 1, "msg": "Thinking...", "tool": ""}
     delta = _accumulate_tokens(task_id, api_call_count, usage)
-    if delta > 0:
-        current: dict[str, Any] = {}
-        if STATUS_FILE.exists():
-            try:
-                current = json.loads(STATUS_FILE.read_text())
-            except Exception:
-                pass
-        updates["tokens_today"] = current.get("tokens_today", 0) + delta
-    _write_status(updates)
+    _write_status({"running": 1, "msg": "Thinking...", "tool": ""}, tokens_delta=delta)
 
 
 def on_post_llm_call(
