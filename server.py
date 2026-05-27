@@ -7,6 +7,7 @@ __init__.py via sys.path insertion; not intended to be run directly.
 from __future__ import annotations
 
 import fcntl
+import hmac
 import json
 import logging
 import math
@@ -15,6 +16,7 @@ import random
 import re
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -70,9 +72,11 @@ TOOL_TYPES = {
     "agent": 4, "spawn_agent": 4, "delegate": 4,
 }
 
-_BUDDY_NAME_RE = re.compile(r'^[A-Za-z0-9 _\-]+$')
+_BUDDY_NAME_RE  = re.compile(r'^[A-Za-z0-9 _\-]+$')
+_DEVICE_ID_RE   = re.compile(r'^[A-Za-z0-9_\-:.]+$')
 
 app = FastAPI(title="Hermes Buddy Server")
+_buddies_lock = threading.Lock()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -143,35 +147,36 @@ def _tokens_for_level(level: int) -> int:
 
 
 def get_or_assign(device_id: str, tokens_today: int = 0) -> tuple[dict, bool]:
-    buddies = load_buddies()
-    if device_id not in buddies:
-        type_id, name = roll_buddy()
-        buddies[device_id] = {
-            "type": type_id, "name": name,
-            "type_name": BUDDY_TYPES[type_id], "rarity": BUDDY_RARITIES[type_id],
-            "assigned_at": int(time.time()),
-            "tokens_total": 0, "tokens_last": 0,
-            "level": 1, "level_notified": 1,
-        }
-    buddy = buddies[device_id]
-    last  = buddy.get("tokens_last", 0)
-    total = buddy.get("tokens_total", 0)
-    total += tokens_today - last if tokens_today >= last else tokens_today
-    buddy["tokens_total"] = total
-    buddy["tokens_last"]  = tokens_today
-    new_level = _compute_level(total)
-    levelup   = new_level > buddy.get("level_notified", 1)
-    buddy["level"] = new_level
-    if levelup:
-        buddy["level_notified"] = new_level
-    buddy["last_seen"] = int(time.time())
-    buddies[device_id] = buddy
-    save_buddies(buddies)
+    with _buddies_lock:
+        buddies = load_buddies()
+        if device_id not in buddies:
+            type_id, name = roll_buddy()
+            buddies[device_id] = {
+                "type": type_id, "name": name,
+                "type_name": BUDDY_TYPES[type_id], "rarity": BUDDY_RARITIES[type_id],
+                "assigned_at": int(time.time()),
+                "tokens_total": 0, "tokens_last": 0,
+                "level": 1, "level_notified": 1,
+            }
+        buddy = buddies[device_id]
+        last  = buddy.get("tokens_last", 0)
+        total = buddy.get("tokens_total", 0)
+        total += tokens_today - last if tokens_today >= last else tokens_today
+        buddy["tokens_total"] = total
+        buddy["tokens_last"]  = tokens_today
+        new_level = _compute_level(total)
+        levelup   = new_level > buddy.get("level_notified", 1)
+        buddy["level"] = new_level
+        if levelup:
+            buddy["level_notified"] = new_level
+        buddy["last_seen"] = int(time.time())
+        buddies[device_id] = buddy
+        save_buddies(buddies)
     return buddy, levelup
 
 
 def require_admin(creds: HTTPAuthorizationCredentials = Depends(security)):
-    if creds.credentials != ADMIN_TOKEN:
+    if not hmac.compare_digest(creds.credentials, ADMIN_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid admin token")
 
 
@@ -182,6 +187,8 @@ def health():
 
 @app.get("/status")
 def status(device_id: str = ""):
+    if device_id and (len(device_id) > 64 or not _DEVICE_ID_RE.match(device_id)):
+        device_id = ""
     try:
         data = json.loads(STATUS_FILE.read_text()) if STATUS_FILE.exists() else dict(_default)
     except Exception:
@@ -250,18 +257,19 @@ class AssignRequest(BaseModel):
 def admin_assign(req: AssignRequest):
     if req.buddy_type < 0 or req.buddy_type > 9:
         raise HTTPException(status_code=400, detail="buddy_type must be 0-9")
-    buddies = load_buddies()
-    prev = buddies.get(req.device_id, {})
-    buddies[req.device_id] = {
-        "type": req.buddy_type, "name": req.buddy_name,
-        "type_name": BUDDY_TYPES[req.buddy_type], "rarity": BUDDY_RARITIES[req.buddy_type],
-        "assigned_at": int(time.time()), "last_seen": prev.get("last_seen", 0),
-        "tokens_total": prev.get("tokens_total", 0), "tokens_last": prev.get("tokens_last", 0),
-        "level": prev.get("level", 1), "level_notified": prev.get("level_notified", 1),
-        "admin_assigned": True,
-    }
-    save_buddies(buddies)
-    buddy = buddies[req.device_id]
+    with _buddies_lock:
+        buddies = load_buddies()
+        prev = buddies.get(req.device_id, {})
+        buddies[req.device_id] = {
+            "type": req.buddy_type, "name": req.buddy_name,
+            "type_name": BUDDY_TYPES[req.buddy_type], "rarity": BUDDY_RARITIES[req.buddy_type],
+            "assigned_at": int(time.time()), "last_seen": prev.get("last_seen", 0),
+            "tokens_total": prev.get("tokens_total", 0), "tokens_last": prev.get("tokens_last", 0),
+            "level": prev.get("level", 1), "level_notified": prev.get("level_notified", 1),
+            "admin_assigned": True,
+        }
+        save_buddies(buddies)
+        buddy = buddies[req.device_id]
     return {"ok": True, "device_id": req.device_id, "buddy_name": buddy["name"], **buddy}
 
 

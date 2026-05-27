@@ -165,7 +165,8 @@ def test_admin_assign_valid(isolated_files):
         headers={"Authorization": "Bearer test-token"},
     )
     assert r.status_code == 200
-    assert r.json()["buddy_name"] == "Forge" or r.json()["name"] == "Forge"
+    assert r.json()["buddy_name"] == "Forge"
+    assert r.json()["name"] == "Forge"
 
 
 def test_admin_assign_invalid_token(isolated_files):
@@ -184,6 +185,14 @@ def test_admin_assign_invalid_buddy_type(isolated_files):
         headers={"Authorization": "Bearer test-token"},
     )
     assert r.status_code == 400
+
+
+def test_status_invalid_device_id_dropped(isolated_files):
+    r = client.get("/status?device_id=" + "x" * 100)
+    assert r.status_code == 200
+    # No buddy assigned — device_id was too long and got dropped
+    data = r.json()
+    assert data.get("buddy_name", "") == ""
 
 
 def test_admin_buddies_lists_devices(isolated_files):
