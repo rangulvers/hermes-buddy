@@ -1,0 +1,548 @@
+esphome:
+  name: agent-buddy
+  friendly_name: Agent Buddy
+
+esp8266:
+  board: d1_mini
+
+logger:
+
+api:
+  encryption:
+    key: !secret esphome_api_key
+
+ota:
+  - platform: esphome
+    password: !secret esphome_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  ap:
+    ssid: "AgentBuddy"
+    password: !secret esphome_ap_password
+
+captive_portal:
+
+i2c:
+  sda: D2
+  scl: D1
+  scan: false
+  frequency: 400kHz
+
+http_request:
+  useragent: esphome/agent-buddy
+  timeout: 2s
+  verify_ssl: false
+
+globals:
+  # ── Claude slot ──────────────────────────────────────────────────────────────
+  - id: g_c_running
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_c_sessions
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_c_tool
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_c_buddy_type
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: g_c_buddy_name
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: g_c_buddy_level
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: g_c_buddy_level_pct
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_c_levelup_ticks
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_c_splash_ticks
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # ── Hermes slot ──────────────────────────────────────────────────────────────
+  - id: g_h_running
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_h_tool
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_h_buddy_type
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: g_h_buddy_name
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+  - id: g_h_buddy_level
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: g_h_buddy_level_pct
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_h_levelup_ticks
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: g_h_splash_ticks
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # ── Display state ─────────────────────────────────────────────────────────────
+  - id: g_idle_tick
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+interval:
+  # Poll Claude Buddy (:3003) every 5s
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - http_request.get:
+                url: !lambda |-
+                  char url[96];
+                  snprintf(url, sizeof(url),
+                    "http://YOUR_CLAUDE_SERVER_IP:3003/status?device_id=%08X",
+                    (unsigned)ESP.getChipId());
+                  return std::string(url);
+                capture_response: true
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) return;
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          id(g_c_sessions) = root["sessions"] | 0;
+                          id(g_c_running)  = root["running"]  | 0;
+                          id(g_c_tool)     = root["tool_type"]| 0;
+                          int bt = root["buddy_type"] | -1;
+                          const char* bn = root["buddy_name"] | "";
+                          if (bt >= 0) {
+                            bool first = (id(g_c_buddy_type) < 0);
+                            id(g_c_buddy_type) = bt;
+                            if (bn && bn[0]) id(g_c_buddy_name) = std::string(bn);
+                            if (first) id(g_c_splash_ticks) = 4;
+                          }
+                          id(g_c_buddy_level)     = root["buddy_level"]     | 1;
+                          id(g_c_buddy_level_pct) = root["buddy_level_pct"] | 0;
+                          bool lu = root["levelup"] | false;
+                          if (lu && id(g_c_levelup_ticks) == 0) id(g_c_levelup_ticks) = 4;
+                          return true;
+                        });
+
+  # Poll Hermes Buddy (:3004) every 5s (staggered 2.5s via second interval)
+  - interval: 5s
+    then:
+      - delay: 2500ms
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - http_request.get:
+                url: !lambda |-
+                  char url[96];
+                  snprintf(url, sizeof(url),
+                    "http://YOUR_HERMES_SERVER_IP:3004/status?device_id=%08X",
+                    (unsigned)ESP.getChipId());
+                  return std::string(url);
+                capture_response: true
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) return;
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          id(g_h_running) = root["running"]   | 0;
+                          id(g_h_tool)    = root["tool_type"] | 0;
+                          int bt = root["buddy_type"] | -1;
+                          const char* bn = root["buddy_name"] | "";
+                          if (bt >= 0) {
+                            bool first = (id(g_h_buddy_type) < 0);
+                            id(g_h_buddy_type) = bt;
+                            if (bn && bn[0]) id(g_h_buddy_name) = std::string(bn);
+                            if (first) id(g_h_splash_ticks) = 4;
+                          }
+                          id(g_h_buddy_level)     = root["buddy_level"]     | 1;
+                          id(g_h_buddy_level_pct) = root["buddy_level_pct"] | 0;
+                          bool lu = root["levelup"] | false;
+                          if (lu && id(g_h_levelup_ticks) == 0) id(g_h_levelup_ticks) = 4;
+                          return true;
+                        });
+
+font:
+  - file: "fonts/PixelOperator.ttf"
+    id: font_medium
+    size: 16
+  - file: "fonts/PixelOperator.ttf"
+    id: font_small
+    size: 11
+
+display:
+  - platform: ssd1306_i2c
+    update_interval: 1s
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      it.fill(COLOR_OFF);
+      const int W  = it.get_width();
+      const int H  = it.get_height();
+      const int CW = W / 2;
+
+      // ── Priority: pick active slot ────────────────────────────────────────────
+      // Claude takes priority if running or has sessions; Hermes next; else idle tick.
+      bool use_claude = (id(g_c_running) || id(g_c_sessions) > 0);
+      bool use_hermes = (!use_claude && id(g_h_running));
+
+      // In pure idle, alternate every 4 display ticks (~4s)
+      if (!use_claude && !use_hermes) {
+        id(g_idle_tick)++;
+        use_claude = ((id(g_idle_tick) / 4) % 2 == 0);
+        use_hermes = !use_claude;
+      }
+
+      // ── Pick globals for active slot ──────────────────────────────────────────
+      int    g_sessions   = use_claude ? id(g_c_sessions)      : 0;
+      int    g_running    = use_claude ? id(g_c_running)        : id(g_h_running);
+      int    g_tool       = use_claude ? id(g_c_tool)           : id(g_h_tool);
+      int    g_buddy_type = use_claude ? id(g_c_buddy_type)     : id(g_h_buddy_type);
+      int    g_buddy_lv   = use_claude ? id(g_c_buddy_level)    : id(g_h_buddy_level);
+      int    g_buddy_pct  = use_claude ? id(g_c_buddy_level_pct): id(g_h_buddy_level_pct);
+      std::string g_buddy_name = use_claude ? id(g_c_buddy_name) : id(g_h_buddy_name);
+      const char* agent_label  = use_claude ? "CLAUDE" : "HERMES";
+
+      // ── Level-up splash (4s, shown once per level) ──
+      int lv_ticks = use_claude ? id(g_c_levelup_ticks) : id(g_h_levelup_ticks);
+      if (lv_ticks > 0) {
+        it.printf(64, 8,  id(font_small),  TextAlign::CENTER, "LEVEL UP!");
+        char lv_str[8];
+        snprintf(lv_str, sizeof(lv_str), "LV %d", g_buddy_lv);
+        it.printf(64, 26, id(font_medium), TextAlign::CENTER, "%s", lv_str);
+        it.printf(64, 46, id(font_small),  TextAlign::CENTER, "%s", g_buddy_name.c_str());
+        if (use_claude) id(g_c_levelup_ticks)--;
+        else            id(g_h_levelup_ticks)--;
+        return;
+      }
+
+      // ── Boot splash (4s after first hatch) ──
+      int sp_ticks = use_claude ? id(g_c_splash_ticks) : id(g_h_splash_ticks);
+      if (sp_ticks > 0) {
+        static const char* rarities[]   = {"Common","Common","Uncommon","Rare","Epic","Common","Rare","Legendary","Uncommon","Mystical"};
+        static const char* type_names[] = {"BOT","CAT","OWL","GHOST","ALIEN","BEAR","FOX","DRAGON","BUNNY","CRYSTAL"};
+        it.printf(64, 2,  id(font_small),  TextAlign::CENTER, "You hatched a");
+        it.printf(64, 18, id(font_medium), TextAlign::CENTER, "%s!", g_buddy_name.c_str());
+        int bt = g_buddy_type;
+        if (bt >= 0 && bt <= 9)
+          it.printf(64, 36, id(font_small), TextAlign::CENTER, "%s %s", rarities[bt], type_names[bt]);
+        char lv_b[8];
+        snprintf(lv_b, sizeof(lv_b), "LV %d", g_buddy_lv);
+        it.printf(64, 52, id(font_small), TextAlign::CENTER, "%s", lv_b);
+        if (use_claude) id(g_c_splash_ticks)--;
+        else            id(g_h_splash_ticks)--;
+        return;
+      }
+
+      // ── Active or idle display ────────────────────────────────────────────────
+      if (g_running || g_sessions > 0) {
+        static uint8_t frame = 0;
+        frame = (frame + 1) % 8;
+        bool running  = g_running;
+        bool blinking = (frame == 7);
+        int bt = (g_buddy_type >= 0 && g_buddy_type <= 9) ? g_buddy_type : 0;
+
+        // Buddy mascot rendering (left half, identical to claude-buddy keller-example.yaml)
+        switch (bt) {
+          default:
+          case 0: {
+            it.circle(32, 33, 22);
+            it.line(32, 11, 32, 4);
+            if (running && (frame % 2 == 0)) it.filled_circle(32, 3, 3);
+            else it.circle(32, 3, 3);
+            if (running) { it.line(18,20,23,18); it.line(41,18,46,20); }
+            else         { it.line(19,23,27,23); it.line(37,23,45,23); }
+            if (blinking) {
+              it.line(19,27,27,27); it.line(37,27,45,27);
+            } else if (running) {
+              it.filled_circle(23,27,5); it.filled_circle(25,29,2,COLOR_OFF);
+              it.filled_circle(41,27,5); it.filled_circle(43,29,2,COLOR_OFF);
+            } else {
+              it.filled_circle(23,28,4); it.filled_rectangle(19,24,8,4,COLOR_OFF);
+              it.filled_circle(41,28,4); it.filled_rectangle(37,24,8,4,COLOR_OFF);
+            }
+            if (running) {
+              it.line(20,40,23,43); it.line(23,43,32,45);
+              it.line(32,45,41,43); it.line(41,43,44,40);
+            } else {
+              it.line(24,41,28,43); it.line(28,43,36,43); it.line(36,43,40,41);
+            }
+            if (running && frame % 2 == 0) {
+              it.line(11,18,6,13); it.line(53,18,58,13); it.line(10,49,5,54);
+            }
+            if (!running) {
+              if (frame >= 1) it.printf(46,16,id(font_small),TextAlign::TOP_LEFT,"z");
+              if (frame >= 3) it.printf(51,9, id(font_small),TextAlign::TOP_LEFT,"z");
+              if (frame >= 5) it.printf(56,3, id(font_small),TextAlign::TOP_LEFT,"Z");
+            }
+            break;
+          }
+          case 1: {
+            it.circle(32, 34, 20);
+            it.line(13,18,20,8); it.line(20,8,27,18);
+            it.line(37,18,44,8); it.line(44,8,51,18);
+            if (blinking) {
+              it.line(21,29,28,29); it.line(36,29,43,29);
+            } else if (running) {
+              it.filled_circle(24,29,4); it.filled_circle(25,30,1,COLOR_OFF);
+              it.filled_circle(40,29,4); it.filled_circle(41,30,1,COLOR_OFF);
+            } else {
+              it.filled_circle(24,30,3); it.filled_circle(40,30,3);
+            }
+            it.filled_circle(32,37,1);
+            it.line(14,33,24,35); it.line(14,36,24,36); it.line(14,39,24,37);
+            it.line(40,35,50,33); it.line(40,36,50,36); it.line(40,37,50,39);
+            it.line(29,40,31,42); it.line(31,42,33,40);
+            if (!running) {
+              if (frame >= 2) it.line(48,50,55,45);
+              if (frame >= 4) it.line(55,45,58,38);
+              if (frame >= 6) it.line(58,38,55,33);
+            }
+            break;
+          }
+          case 2: {
+            it.circle(32, 35, 22);
+            it.line(18,16,22,12); it.line(22,12,26,16);
+            it.line(38,16,42,12); it.line(42,12,46,16);
+            if (blinking) {
+              it.line(17,29,29,29); it.line(35,29,47,29);
+            } else if (running) {
+              it.filled_circle(23,29,7); it.filled_circle(26,32,3,COLOR_OFF);
+              it.filled_circle(41,29,7); it.filled_circle(44,32,3,COLOR_OFF);
+            } else {
+              it.filled_circle(23,30,6); it.filled_circle(25,31,2,COLOR_OFF);
+              it.filled_circle(41,30,6); it.filled_circle(43,31,2,COLOR_OFF);
+            }
+            it.line(29,40,32,44); it.line(32,44,35,40);
+            if (running && frame % 2 == 0) {
+              it.line(10,35,5,28); it.line(54,35,59,28);
+            }
+            break;
+          }
+          case 3: {
+            it.filled_circle(32, 22, 14);
+            it.filled_rectangle(18, 22, 28, 20);
+            int w = running ? (frame % 2) : 0;
+            it.filled_circle(21, 44+w, 5);
+            it.filled_circle(32, 44-w, 5);
+            it.filled_circle(43, 44+w, 5);
+            it.filled_rectangle(18, 44, 28, 6, COLOR_OFF);
+            if (blinking) {
+              it.line(22,27,30,27); it.line(34,27,42,27);
+            } else {
+              it.circle(26, 28, 4); it.circle(38, 28, 4);
+            }
+            if (!running && frame % 2 == 0) {
+              it.filled_circle(32, 20, 14);
+              it.filled_rectangle(18, 20, 28, 20);
+            }
+            break;
+          }
+          case 4: {
+            it.circle(32, 35, 24);
+            it.line(22,11,18,4); it.filled_circle(18,3,2);
+            it.line(42,11,46,4); it.filled_circle(46,3,2);
+            if (running && frame % 2 == 0) {
+              it.filled_circle(18,3,3); it.filled_circle(46,3,3);
+            }
+            if (blinking) {
+              it.line(18,29,29,29); it.line(35,29,46,29);
+            } else if (running) {
+              it.filled_circle(23,29,5); it.filled_rectangle(18,27,10,4,COLOR_OFF);
+              it.filled_circle(41,29,5); it.filled_rectangle(36,27,10,4,COLOR_OFF);
+            } else {
+              it.filled_circle(23,30,5); it.filled_rectangle(18,28,10,4,COLOR_OFF);
+              it.filled_circle(41,30,5); it.filled_rectangle(36,28,10,4,COLOR_OFF);
+            }
+            it.line(30,38,32,41); it.line(32,41,34,38);
+            if (running) {
+              it.line(22,46,32,49); it.line(32,49,42,46);
+            } else {
+              it.line(26,46,38,46);
+            }
+            break;
+          }
+          case 5: {
+            it.circle(32, 35, 20);
+            it.filled_circle(14,18,6); it.filled_circle(50,18,6);
+            if (blinking) {
+              it.line(21,28,28,28); it.line(36,28,43,28);
+            } else if (running) {
+              it.filled_circle(24,28,4); it.filled_circle(25,29,1,COLOR_OFF);
+              it.filled_circle(40,28,4); it.filled_circle(41,29,1,COLOR_OFF);
+            } else {
+              it.filled_circle(24,29,3); it.filled_circle(40,29,3);
+            }
+            it.circle(32, 40, 8);
+            it.filled_circle(21,36,1); it.filled_circle(18,39,1); it.filled_circle(21,42,1);
+            it.filled_circle(43,36,1); it.filled_circle(46,39,1); it.filled_circle(43,42,1);
+            it.line(28,42,31,44); it.line(31,44,33,44); it.line(33,44,36,42);
+            break;
+          }
+          case 6: {
+            it.circle(32, 34, 20);
+            it.line(15,18,20,6); it.line(20,6,27,18);
+            it.line(37,18,44,6); it.line(44,6,49,18);
+            if (blinking) {
+              it.line(21,26,28,26); it.line(36,26,43,26);
+            } else if (running) {
+              it.line(21,25,28,25); it.line(21,27,28,27);
+              it.line(36,25,43,25); it.line(36,27,43,27);
+            } else {
+              it.line(21,26,28,26); it.line(21,27,25,27);
+              it.line(36,26,43,26); it.line(39,27,43,27);
+            }
+            it.filled_rectangle(24,36,16,10);
+            it.filled_rectangle(25,37,14,8,COLOR_OFF);
+            it.filled_circle(32,38,2);
+            if (running) {
+              it.line(26,44,29,46); it.line(29,46,35,47);
+              it.line(35,47,38,46); it.line(38,46,41,44);
+            } else {
+              it.line(28,44,32,46); it.line(32,46,36,44);
+            }
+            if (!running && frame >= 3) {
+              it.line(50,48,56,42);
+              if (frame >= 5) it.line(56,42,58,36);
+            }
+            break;
+          }
+          case 7: {
+            it.line(12,16,52,16); it.line(52,16,52,46);
+            it.line(52,46,12,46); it.line(12,46,12,16);
+            it.line(12,16,6,8);   it.line(52,16,58,8);
+            it.line(24,18,32,22); it.line(32,22,40,18);
+            if (blinking) {
+              it.line(16,29,27,29); it.line(37,29,48,29);
+            } else if (running) {
+              it.filled_circle(21,29,5); it.line(21,24,21,34);
+              it.filled_circle(43,29,5); it.line(43,24,43,34);
+            } else {
+              it.filled_circle(21,30,4); it.line(21,26,21,34);
+              it.filled_circle(43,30,4); it.line(43,26,43,34);
+            }
+            it.filled_circle(28,40,1); it.filled_circle(36,40,1);
+            if (running) {
+              it.line(14,44,18,42); it.line(18,42,22,46); it.line(22,46,26,42);
+              it.line(26,42,32,46); it.line(32,46,38,42); it.line(38,42,42,46); it.line(42,46,50,44);
+            } else {
+              it.line(14,44,50,44);
+            }
+            if (running && frame % 2 == 0) {
+              it.line(14,46,8,52); it.line(8,52,6,58);
+              it.line(18,47,14,56);
+            }
+            break;
+          }
+          case 8: {
+            it.circle(32, 38, 16);
+            it.line(25,22,25,5); it.line(27,22,27,5); it.line(25,5,27,5);
+            it.line(37,22,37,5); it.line(39,22,39,5); it.line(37,5,39,5);
+            if (blinking) {
+              it.line(23,33,29,33); it.line(35,33,41,33);
+            } else if (running) {
+              it.filled_circle(26,33,3); it.filled_circle(26,33,1,COLOR_OFF);
+              it.filled_circle(38,33,3); it.filled_circle(38,33,1,COLOR_OFF);
+            } else {
+              it.filled_circle(26,34,3); it.filled_circle(38,34,3);
+            }
+            it.line(28,40,31,43); it.line(31,43,33,43); it.line(33,43,36,40);
+            if (!running) {
+              if (frame >= 2) it.filled_circle(22,50,3);
+              if (frame >= 4) it.filled_circle(32,52,3);
+              if (frame >= 6) it.filled_circle(42,50,3);
+            } else {
+              it.line(22,47,26,52); it.line(26,52,32,54);
+              it.line(32,54,38,52); it.line(38,52,42,47);
+            }
+            break;
+          }
+          case 9: {
+            for (int i = 0; i < 6; i++) {
+              float a = i * 3.14159f / 3.0f;
+              int x1 = (int)(32 + 22 * cos(a));
+              int y1 = (int)(32 + 22 * sin(a));
+              int x2 = (int)(32 + 22 * cos(a + 3.14159f / 3.0f));
+              int y2 = (int)(32 + 22 * sin(a + 3.14159f / 3.0f));
+              it.line(x1, y1, x2, y2);
+              if (running) {
+                int mx = (int)(32 + 10 * cos(a + frame * 3.14159f / 4.0f));
+                int my = (int)(32 + 10 * sin(a + frame * 3.14159f / 4.0f));
+                it.filled_circle(mx, my, 2);
+              }
+            }
+            if (blinking) {
+              it.line(22,29,30,29); it.line(34,29,42,29);
+            } else if (running) {
+              it.filled_circle(26,29,4); it.filled_circle(38,29,4);
+            } else {
+              it.filled_circle(26,30,3); it.filled_circle(38,30,3);
+            }
+            it.line(29,36,32,39); it.line(32,39,35,36);
+            break;
+          }
+        }
+
+        // Right half: agent label + status
+        it.printf(70, 0, id(font_small), TextAlign::TOP_LEFT, agent_label);
+
+        // Tool or status line
+        static const char* tool_labels[] = {"", "BASH", "FILE", "WEB", "AGNT", "PLAN"};
+        int tl = (g_tool >= 0 && g_tool <= 5) ? g_tool : 0;
+        if (g_running && tl > 0) {
+          it.printf(70, 13, id(font_small), TextAlign::TOP_LEFT, tool_labels[tl]);
+        } else if (g_running) {
+          it.printf(70, 13, id(font_small), TextAlign::TOP_LEFT, "...");
+        } else {
+          it.printf(70, 13, id(font_small), TextAlign::TOP_LEFT, "idle");
+        }
+
+        // Session count (Claude only)
+        if (use_claude && g_sessions > 0) {
+          char sess_buf[8];
+          snprintf(sess_buf, sizeof(sess_buf), "%d sess", g_sessions);
+          it.printf(70, 26, id(font_small), TextAlign::TOP_LEFT, sess_buf);
+        }
+
+        // Buddy name + level
+        if (!g_buddy_name.empty()) {
+          it.printf(70, 39, id(font_small), TextAlign::TOP_LEFT, "%s", g_buddy_name.c_str());
+          it.printf(70, 52, id(font_small), TextAlign::TOP_LEFT, "LV%d %d%%", g_buddy_lv, g_buddy_pct);
+        }
+      } else {
+        // Idle — show agent label centered
+        it.printf(64, 8,  id(font_small), TextAlign::CENTER, agent_label);
+        it.printf(64, 28, id(font_small), TextAlign::CENTER, "idle");
+        if (!g_buddy_name.empty()) {
+          it.printf(64, 44, id(font_small), TextAlign::CENTER, "%s", g_buddy_name.c_str());
+          it.printf(64, 56, id(font_small), TextAlign::CENTER, "LV%d", g_buddy_lv);
+        }
+      }
