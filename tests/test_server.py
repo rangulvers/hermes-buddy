@@ -18,6 +18,8 @@ from server import (
     TOKENS_BASE,
     _compute_level,
     _tokens_for_level,
+    _STATUS_DIR,
+    _STATUS_GLOB,
     app,
     get_or_assign,
     roll_buddy,
@@ -29,11 +31,11 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def isolated_files(tmp_path, monkeypatch):
     import server as srv
-    status = tmp_path / "hermes-status.json"
     buddies = tmp_path / "buddies.json"
-    monkeypatch.setattr(srv, "STATUS_FILE", status)
+    monkeypatch.setattr(srv, "_STATUS_DIR", tmp_path)
     monkeypatch.setattr(srv, "BUDDIES_FILE", buddies)
     monkeypatch.setattr(srv, "ADMIN_TOKEN", "test-token")
+    status = tmp_path / "hermes-status-99999.json"
     yield {"status": status, "buddies": buddies}
 
 
@@ -203,3 +205,19 @@ def test_admin_buddies_lists_devices(isolated_files):
     data = r.json()
     assert "dev-a" in data
     assert "dev-b" in data
+
+
+def test_multi_session_tokens_aggregated(isolated_files):
+    import server as srv
+    now = int(time.time())
+    # Two sessions running simultaneously
+    (isolated_files["status"].parent / "hermes-status-11111.json").write_text(
+        json.dumps({"running": 1, "tool": "bash", "msg": "bash", "tokens_today": 500, "ts": now})
+    )
+    (isolated_files["status"].parent / "hermes-status-22222.json").write_text(
+        json.dumps({"running": 0, "tool": "", "msg": "Idle", "tokens_today": 300, "ts": now - 10})
+    )
+    r = client.get("/status")
+    assert r.json()["tokens_today"] == 800
+    assert r.json()["running"] == 1  # active session wins display
+    assert r.json()["sessions"] == 1  # one running session

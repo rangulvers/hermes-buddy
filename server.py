@@ -28,7 +28,8 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger("hermes-buddy")
 
-STATUS_FILE  = Path("/tmp/hermes-status.json")
+_STATUS_DIR  = Path("/tmp")
+_STATUS_GLOB = "hermes-status-*.json"
 BUDDIES_FILE = Path.home() / ".hermes-buddy" / "buddies.json"
 BUDDIES_FILE.parent.mkdir(exist_ok=True)
 
@@ -128,6 +129,30 @@ def save_buddies(data: dict) -> None:
         raise
 
 
+def _read_active_sessions() -> list[dict]:
+    """Read all per-PID status files. Clean up dead sessions. Apply stale timeout."""
+    now = time.time()
+    active: list[dict] = []
+    for p in _STATUS_DIR.glob(_STATUS_GLOB):
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            continue
+        age = now - data.get("ts", 0)
+        if age > STALE_AFTER * 2:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            continue
+        if age > STALE_AFTER and data.get("running"):
+            data["running"] = 0
+            data["msg"] = "Idle"
+            data["tool"] = ""
+        active.append(data)
+    return active
+
+
 def roll_buddy() -> tuple[int, str]:
     roll = random.randint(0, 999)
     for type_id, upper in SPAWN_WEIGHTS:
@@ -187,25 +212,27 @@ def health():
 
 @app.get("/status")
 def status(device_id: str = ""):
-    if device_id and (len(device_id) > 64 or not _DEVICE_ID_RE.match(device_id)):
-        device_id = ""
-    try:
-        data = json.loads(STATUS_FILE.read_text()) if STATUS_FILE.exists() else dict(_default)
-    except Exception:
+    sessions = _read_active_sessions()
+
+    running_sessions = [s for s in sessions if s.get("running")]
+    if running_sessions:
+        data = max(running_sessions, key=lambda s: s.get("ts", 0))
+    elif sessions:
+        data = max(sessions, key=lambda s: s.get("ts", 0))
+    else:
         data = dict(_default)
 
-    tokens_today = data.get("tokens_today", 0)
-    if not isinstance(tokens_today, int) or isinstance(tokens_today, bool) or tokens_today < 0:
-        tokens_today = 0
+    tokens_today = sum(s.get("tokens_today", 0) for s in sessions
+                       if isinstance(s.get("tokens_today"), int))
+    data["tokens_today"] = tokens_today
+    data["sessions"] = len(running_sessions)
+
+    if device_id and (len(device_id) > 64 or not _DEVICE_ID_RE.match(device_id)):
+        device_id = ""
 
     buddy, levelup = None, False
     if device_id:
         buddy, levelup = get_or_assign(device_id, tokens_today)
-
-    if time.time() - data.get("ts", 0) > STALE_AFTER and data.get("running"):
-        data["running"] = 0
-        data["msg"] = "Idle"
-        data["tool"] = ""
 
     tool = data.get("tool", "")
     data["tool_type"] = TOOL_TYPES.get(tool, 0) if data.get("running") else 0

@@ -26,7 +26,7 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-STATUS_FILE = Path("/tmp/hermes-status.json")
+STATUS_FILE = Path(f"/tmp/hermes-status-{os.getpid()}.json")
 
 _last_usage_key: tuple | None = None
 _usage_lock = threading.Lock()
